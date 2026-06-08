@@ -1,6 +1,6 @@
 import json
 
-from tools import WORKDIR
+from config import WORKDIR
 
 DENY_LIST = [
     "rm -rf /", "sudo", "shutdown", "reboot",

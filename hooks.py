@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Callable, Any
 
 from rules import check_deny_list, check_rules, ask_user
-from tools import WORKDIR
+from config import WORKDIR
 
 # ═══════════════════════════════════════════════════════════
 # 事件类型

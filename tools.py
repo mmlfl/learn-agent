@@ -1,8 +1,11 @@
 import json
+import os
 import subprocess
 from pathlib import Path
+from openai import OpenAI
 
-WORKDIR = Path.cwd()
+from hooks import hooks, ToolUseEvent
+
 TASK_FILE = None
 
 TOOLS = [
@@ -143,6 +146,23 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_task",
+            "description": "Spawn a task to let sub agent to complete it",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "a task description let sub agent know what is this task"
+                    }
+                },
+                "required": ["description"]
+            }
+        }
+    },
 ]
 
 
@@ -215,7 +235,7 @@ def run_write(**kwargs) -> str:
     try:
         file_path = safe_path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content,encoding="utf-8")
+        file_path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -281,7 +301,192 @@ def run_todo_write(todos: list) -> str:
     return "Tasks:\n" + "\n".join(lines) if lines else "No tasks."
 
 
+SUB_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "bash command to run",
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read file contents",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to read",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of bytes to read (default 10000)",
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to write",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the file",
+                    }
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace exact text in a file once",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to replace",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "New text to insert",
+                    }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "Find files matching a glob pattern",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern to match files (e.g. /tmp/*.log)",
+                    }
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+]
+SUB_TOOL_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,
+}
+
+
+def extract_content(messages: list[dict]) -> str:
+    result = []
+    for message in messages:
+        if message.get("role") == "tool":
+            result.append(message["content"])
+    return "\n".join(result)
+
+
+def run_spawn_task(description: str) -> str | None:
+    """这是创建一个子agent处理主agent发过来的任务,最后将总结返回"""
+    SYSTEM_PROMPT = """
+        you are a subagent,you just to complete this task and return the result to master agent
+    """
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": description},
+    ]
+    client = OpenAI(
+        base_url=os.getenv("DASHSCOPE_BASE_URL"),
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+    )
+    round_time = 0
+    while round_time < 30:
+        round_time += 1
+        response = client.chat.completions.create(
+            model=os.getenv("MODEL_NAME"),
+            messages=messages,
+            tools=SUB_TOOLS,
+            tool_choice="auto",
+            max_tokens=4000
+        )
+        choice = response.choices[0]
+        if choice.finish_reason != "tool_calls":
+            return choice.message.content
+
+        # 3. 把模型的回复加入对话历史
+        messages.append({
+            "role": "assistant",
+            "content": choice.message.content,
+            "tool_calls": choice.message.tool_calls if choice.message.tool_calls else None
+        })
+
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                name = tc.function.name
+                args = tc.function.arguments
+                hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
+                    tool_name=name,
+                    tool_args=args,
+                    tool_call_id=tc.id
+                ))
+                if hook_result is not None:
+                    # 权限被拒绝，阻止工具执行
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"[Blocked] {hook_result}",
+                    })
+                    continue  # 跳过此工具，处理下一个
+
+                # ── 执行工具 ──
+                handler = SUB_TOOL_HANDLERS.get(name)
+                if handler is None:
+                    output = f"Error: Unknown tool '{name}'"
+                else:
+                    output = handler(**args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"{output}",
+                })
+    print("思考轮数超过了30轮...")
+    return extract_content(messages)
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
+    "spawn_task": run_spawn_task,
 }
