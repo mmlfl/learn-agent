@@ -5,7 +5,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from hooks import hooks, ToolUseEvent
-
+from config import WORKDIR
 TASK_FILE = None
 
 TOOLS = [

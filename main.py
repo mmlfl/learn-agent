@@ -8,7 +8,8 @@ from openai import OpenAI
 
 import tools
 from hooks import hooks, ToolUseEvent, ToolResultEvent
-from tools import TOOLS, TOOL_HANDLERS, WORKDIR
+from tools import TOOLS, TOOL_HANDLERS
+from config import WORKDIR
 
 load_dotenv(override=True)
 
