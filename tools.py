@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from hooks import hooks, ToolUseEvent
 from config import WORKDIR
-TASK_FILE = None
+TASK_FILE = Path()
 
 TOOLS = [
     {
@@ -150,7 +150,9 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "spawn_task",
-            "description": "Spawn a task to let sub agent to complete it",
+            "description": ("Launch a subagent to handle complex, multi-step subtasks independently"
+                           "(e.g. reading multiple files and summarizing). The subagent has fresh context and returns only its conclusion."
+                            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -292,6 +294,7 @@ def run_todo_write(todos: list) -> str:
     merged = list(existing.values())
     # 3. 写回
     if TASK_FILE:
+        TASK_FILE.parent.mkdir(parents=True, exist_ok=True)
         TASK_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
     # 4. 返回格式化的任务清单给模型看
     icons = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}
@@ -418,11 +421,12 @@ def extract_content(messages: list[dict]) -> str:
     return "\n".join(result)
 
 
-def run_spawn_task(description: str) -> str | None:
+def run_spawn_task(**kwargs) -> str | None:
     """这是创建一个子agent处理主agent发过来的任务,最后将总结返回"""
     SYSTEM_PROMPT = """
         you are a subagent,you just to complete this task and return the result to master agent
     """
+    description = kwargs.get("description","no input")
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": description},
@@ -435,11 +439,11 @@ def run_spawn_task(description: str) -> str | None:
     while round_time < 30:
         round_time += 1
         response = client.chat.completions.create(
-            model=os.getenv("MODEL_NAME"),
+            model=os.getenv("MODEL_NAME","qwen-vl-plus"),
             messages=messages,
             tools=SUB_TOOLS,
             tool_choice="auto",
-            max_tokens=4000
+            max_tokens=4096
         )
         choice = response.choices[0]
         if choice.finish_reason != "tool_calls":
@@ -456,6 +460,8 @@ def run_spawn_task(description: str) -> str | None:
             for tc in choice.message.tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments
+                if isinstance(args, str):
+                    args = json.loads(args)
                 hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
                     tool_name=name,
                     tool_args=args,

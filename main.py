@@ -17,20 +17,28 @@ client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url=os.getenv("DASHSCOPE_BASE_URL"),
 )
-MODEL = os.getenv("MODEL_ID","qwen-plus-2025-07-28")
+MODEL = os.getenv("MODEL_NAME","qwen-vl-plus")
 
-SYSTEM = f"""You are a coding agent at {os.getcwd()} on windows system.
+SYSTEM = f"""You are a coding agent at {os.getcwd()} on Windows. You have access to tools and subagents.
 
- ## Task Workflow
- When the user gives you a complex task:
- 1. FIRST, call todo_write to break it down into subtasks (pending status)
- 2. Call todo_read to see what to work on next
- 3. Execute that task using the available tools (bash, read_file, write_file, etc.)
- 4. When done, call todo_write to mark the task completed and the next one in_progress
- 5. Call todo_read again to get the next task
- 6. Repeat until todo_read says "All tasks completed!"
+  ## Task Workflow
 
- Always work one task at a time. Use todo_read to stay on track."""
+  When the user gives you a complex task:
+
+  1. **Plan at the goal level** — call todo_write to break the task into 2-5 meaningful subtasks. Each subtask should be  a complete goal (e.g. "understand all source files"), NOT a single operation (e.g. "read main.py"). Avoid
+  micro-tasking.
+
+  2. **Execute each subtask** — for the current subtask, decide:
+     - If it requires multiple operations (reading several files, running commands then analyzing) → use `spawn_task` to
+  delegate to a subagent
+     - If it's a single operation (read one known file, run one command) → do it yourself
+
+  3. **Mark progress** — when a subtask is complete, use todo_write to mark it completed and move the next one to
+  in_progress
+
+  4. **Repeat** until all subtasks are done, then deliver the final answer.
+
+  Always work one subtask at a time."""
 
 
 # ── ANSI 颜色定义 ──────────────────────────────────────────
@@ -107,7 +115,10 @@ def agent_loop(messages: list):
         # 6. 执行工具调用
         print(f"\n  {_sep('Executing')}")
         for tc in choice.message.tool_calls:
-            args = json.loads(tc.function.arguments)
+            args = tc.function.arguments
+            print(repr(args))
+            if isinstance(args,str):
+                args = json.loads(args)
             name = tc.function.name
 
             # ── 工具执行前校验 ──
