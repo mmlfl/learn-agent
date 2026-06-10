@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from hooks import hooks, ToolUseEvent
 from config import WORKDIR
+from ui import subagent_display, console
 TASK_FILE = Path()
 
 TOOLS = [
@@ -213,7 +214,7 @@ def run_read(**kwargs) -> str:
     except UnicodeDecodeError:
         # 🔧 如果 UTF-8 失败，尝试 GBK
         try:
-            content = safe_path(path).read_text(encoding='gbk')
+            content = safe_path(path).read_text(encoding='utf-8')
             lines = content.splitlines()
             if limit and limit < len(lines):
                 lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
@@ -258,10 +259,10 @@ def run_edit(**kwargs) -> str:
 
     try:
         file_path = safe_path(path)
-        text = file_path.read_text()
+        text = file_path.read_text(encoding="utf-8")
         if old_text not in text:
             return f"Error: '{old_text}' not found in {path}"
-        file_path.write_text(text.replace(old_text, new_text, 1))
+        file_path.write_text(text.replace(old_text, new_text, 1),encoding="utf-8")
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -422,11 +423,11 @@ def extract_content(messages: list[dict]) -> str:
 
 
 def run_spawn_task(**kwargs) -> str | None:
-    """这是创建一个子agent处理主agent发过来的任务,最后将总结返回"""
+    """创建子 agent 处理主 agent 发过来的任务，最后将总结返回。"""
     SYSTEM_PROMPT = """
         you are a subagent,you just to complete this task and return the result to master agent
     """
-    description = kwargs.get("description","no input")
+    description = kwargs.get("description", "no input")
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": description},
@@ -435,26 +436,37 @@ def run_spawn_task(**kwargs) -> str | None:
         base_url=os.getenv("DASHSCOPE_BASE_URL"),
         api_key=os.getenv("DASHSCOPE_API_KEY"),
     )
+
+    # ── 开始追踪子 agent ──
+    tracker = subagent_display.start(description)
+
     round_time = 0
     while round_time < 30:
         round_time += 1
+
         response = client.chat.completions.create(
-            model=os.getenv("MODEL_NAME","qwen-vl-plus"),
+            model=os.getenv("MODEL_NAME", "qwen-vl-plus"),
             messages=messages,
             tools=SUB_TOOLS,
             tool_choice="auto",
             max_tokens=4096
         )
         choice = response.choices[0]
+
+        # 子 agent 返回最终结果
         if choice.finish_reason != "tool_calls":
+            subagent_display.finish(tracker, choice.message.content)
             return choice.message.content
 
-        # 3. 把模型的回复加入对话历史
+        # 加入对话历史
         messages.append({
             "role": "assistant",
             "content": choice.message.content,
             "tool_calls": choice.message.tool_calls if choice.message.tool_calls else None
         })
+
+        # 记录本轮工具调用
+        round_logs: list[dict] = []
 
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
@@ -462,33 +474,43 @@ def run_spawn_task(**kwargs) -> str | None:
                 args = tc.function.arguments
                 if isinstance(args, str):
                     args = json.loads(args)
+
                 hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
                     tool_name=name,
                     tool_args=args,
                     tool_call_id=tc.id
                 ))
                 if hook_result is not None:
-                    # 权限被拒绝，阻止工具执行
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": f"[Blocked] {hook_result}",
                     })
-                    continue  # 跳过此工具，处理下一个
+                    round_logs.append({"name": name, "args": args, "output": f"[Blocked] {hook_result}"})
+                    continue
 
-                # ── 执行工具 ──
                 handler = SUB_TOOL_HANDLERS.get(name)
                 if handler is None:
                     output = f"Error: Unknown tool '{name}'"
                 else:
                     output = handler(**args)
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": f"{output}",
                 })
-    print("思考轮数超过了30轮...")
-    return extract_content(messages)
+                round_logs.append({"name": name, "args": args, "output": output})
+
+        # 将本轮工具调用记录到 tracker
+        if round_logs:
+            tracker.add_round(round_logs)
+
+    # 超过 30 轮
+    console.print("  [yellow]⚠ 子 agent 思考轮数超过了 30 轮[/]")
+    result = extract_content(messages)
+    subagent_display.finish(tracker, result)
+    return result
 
 
 TOOL_HANDLERS = {

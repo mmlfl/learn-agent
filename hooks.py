@@ -11,6 +11,7 @@ from typing import Callable, Any
 
 from rules import check_deny_list, check_rules, ask_user
 from config import WORKDIR
+from ui import console
 
 # ═══════════════════════════════════════════════════════════
 # 事件类型
@@ -120,7 +121,7 @@ hooks = HookManager()
 @hooks.on("UserPromptSubmit")
 def context_inject(e: UserPromptEvent) -> str | None:
     """每次用户输入时打印当前工作目录"""
-    print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
+    console.print(f"  [dim][HOOK] UserPromptSubmit: working in {WORKDIR}[/]")
     return None
 
 
@@ -133,7 +134,7 @@ def permission_check(e: ToolUseEvent) -> str | None:
     if e.tool_name == "bash":
         reason = check_deny_list(e.tool_args.get("command", ""))
         if reason:
-            print(f"\n⛔ {reason}")
+            console.print(f"  [red]⛔ {reason}[/]")
             return reason
 
     # 闸门 2 + 3：规则匹配 → 用户审批
@@ -146,20 +147,13 @@ def permission_check(e: ToolUseEvent) -> str | None:
     return None
 
 
-@hooks.on("PreToolUse")
-def tool_log(e: ToolUseEvent) -> str | None:
-    """记录每次工具调用"""
-    print(f"  \033[90m[HOOK] {e.tool_name}(...)\033[0m")
-    return None
-
-
 # ── PostToolUse ───────────────────────────────────────
 
 @hooks.on("PostToolUse")
 def large_output_warning(e: ToolResultEvent) -> str | None:
     """大输出提醒"""
     if len(str(e.output)) > 100000:
-        print(f"  \033[93m[HOOK] ⚠ {e.tool_name} 返回了 {len(str(e.output))} 字符的大输出\033[0m")
+        console.print(f"  [yellow][HOOK] ⚠ {e.tool_name} 返回了 {len(str(e.output))} 字符的大输出[/]")
     return None
 
 
@@ -172,5 +166,5 @@ def session_summary(e: StopEvent) -> str | None:
         1 for m in e.messages
         if m.get("role") == "tool"
     )
-    print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
+    console.print(f"  [dim][HOOK] Stop: session used {tool_count} tool calls[/]")
     return None

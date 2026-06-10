@@ -1,6 +1,7 @@
 import json
 
 from config import WORKDIR
+from ui import console
 
 DENY_LIST = [
     "rm -rf /", "sudo", "shutdown", "reboot",
@@ -34,9 +35,9 @@ def check_rules(tool_name: str, args: dict) -> str | None:
     return None
 
 def ask_user(tool_name: str, args: dict, reason: str) -> str:
-    print(f"\n⚠  {reason}")
-    print(f"   Tool: {tool_name}({args})")
-    choice = input("   Allow? [y/N] ").strip().lower()
+    console.print(f"\n  [yellow]⚠  {reason}[/]")
+    console.print(f"     Tool: [blue]{tool_name}[/]({args})")
+    choice = input("     Allow? [y/N] ").strip().lower()
     return "allow" if choice in ("y", "yes") else "deny"
 
 def check_permission(tool_call) -> bool:
