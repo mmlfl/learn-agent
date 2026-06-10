@@ -1,242 +1,311 @@
 """
-UI 模块 — 基于 Rich 的终端界面渲染。
+UI module — Rich-based terminal rendering for the agent loop.
 
-职责：
-  - AgentLoopDisplay: 主 agent 循环展示（轮次、模型回复、工具调用、最终回复）
-  - SubAgentDisplay:   子 agent 展示（摘要行 + 可折叠工具调用树）
-  - Theme:             统一的颜色/样式常量
-
-用法：
-  from ui import agent_display, subagent_display, console
-
-  # 主 agent
-  agent_display.show_welcome("qwen-plus")
-  agent_display.show_round_header(1)
-  with agent_display.model_thinking():
-      response = client.chat.completions.create(...)
-  agent_display.show_model_response("tool_calls", content, 1.2)
-  ...
-
-  # 子 agent
-  tracker = subagent_display.start("探索项目结构")
-  # ... 执行工具调用，用 tracker.add_round(...) 记录 ...
-  subagent_display.finish(tracker, result_text)
+Design:
+  - Rich Panels with color-coded borders per tool type
+  - Show full args and output content (not metrics-only)
+  - Todo output rendered as a formatted tree
+  - Clean round separation with Rule lines
 """
 
-import time
 import json
+import os
+import textwrap
+import time
 from typing import Optional
 
 from rich.console import Console, Group
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 from rich.style import Style
 from rich import box
 from rich.status import Status
+from rich.rule import Rule
+from rich.columns import Columns
 
-# ── 全局 Console 单例 ────────────────────────────────────
 console = Console()
 
-# ═══════════════════════════════════════════════════════════
-# Theme — 统一颜色/样式
-# ═══════════════════════════════════════════════════════════
 
-class Theme:
-    TITLE     = Style(color="cyan", bold=True)
-    SUCCESS   = Style(color="green")
-    TOOL      = Style(color="blue")
-    DIM       = Style(color="bright_black")
-    SUBAGENT  = Style(color="magenta")
-    ERROR     = Style(color="red")
-    MODEL     = Style(color="yellow")
-    USER      = Style(color="yellow", bold=True)
-    HIGHLIGHT = Style(color="magenta", bold=True)
-    BOLD      = Style(bold=True)
-    RULE      = Style(color="bright_black")
+# ============================================================
+# Theme — color palette & tool metadata
+# ============================================================
+
+class T:
+    """Theme shortcuts."""
+    CYAN    = "cyan"
+    GREEN   = "green"
+    RED     = "red"
+    YELLOW  = "yellow"
+    BLUE    = "blue"
+    MAGENTA = "magenta"
+    BRIGHT_CYAN = "bright_cyan"
+    DIM     = "bright_black"
+    BOLD    = "bold"
+    WHITE   = "white"
+
+# (label_str, color_str, border_color_str)
+TOOL_META = {
+    "bash":       ("bash",       T.BLUE,    "blue"),
+    "read_file":  ("read",       T.GREEN,   "green"),
+    "write_file": ("write",      T.GREEN,   "green"),
+    "edit_file":  ("edit",       T.GREEN,   "green"),
+    "glob":       ("glob",       T.BRIGHT_CYAN, "bright_cyan"),
+    "grep":       ("grep",       T.BRIGHT_CYAN, "bright_cyan"),
+    "todo_write": ("todo",       T.MAGENTA, "magenta"),
+    "spawn_task": ("spawn",      T.CYAN,    "cyan"),
+}
 
 
-# ═══════════════════════════════════════════════════════════
-# 辅助函数
-# ═══════════════════════════════════════════════════════════
+# ============================================================
+# Helpers
+# ============================================================
 
-def _truncate(text: str, max_len: int = 80) -> str:
-    """截断文本，替换换行为空格"""
-    text = text.replace("\n", " ").replace("\r", "")
-    if len(text) > max_len:
-        return text[:max_len] + "..."
-    return text
+def _trunc(text: str, n: int) -> str:
+    """Truncate to n chars, collapse newlines."""
+    s = text.replace("\n", " ").replace("\r", "")
+    if len(s) > n:
+        return s[:n-3] + "..."
+    return s
 
 
-def _tool_arg_preview(args: dict) -> str:
-    """从工具参数中提取可读的简短描述"""
+def _safe(text: str) -> str:
+    """Strip Unicode replacement chars from decode errors."""
+    return text.replace('�', '')
+
+
+def _arg_str(args: dict) -> str:
+    """Human-readable one-liner for tool arguments."""
     if "command" in args:
-        return _truncate(args["command"], 60)
+        return args["command"]
     if "path" in args:
-        return _truncate(args["path"], 60)
+        return args["path"]
+    if "pattern" in args:
+        return args["pattern"]
     if "description" in args:
-        return _truncate(args["description"], 60)
+        return args["description"]
     if "todos" in args:
-        return f"{len(args['todos'])} tasks"
-    return _truncate(json.dumps(args, ensure_ascii=False), 60)
+        items = args["todos"]
+        if not isinstance(items, list):
+            return "?"
+        c = {"pending": 0, "in_progress": 0, "completed": 0}
+        for t in items:
+            s = t.get("status", "")
+            if s in c: c[s] += 1
+        parts = []
+        if c["completed"]: parts.append(f"{c['completed']} done")
+        if c["in_progress"]: parts.append(f"{c['in_progress']} active")
+        if c["pending"]: parts.append(f"{c['pending']} pending")
+        return ", ".join(parts) if parts else "0"
+    return json.dumps(args, ensure_ascii=False)
 
 
-def _output_preview(output: str, max_len: int = 200) -> str:
-    """工具输出预览"""
-    if not output:
-        return "(空)"
-    preview = output[:max_len].replace("\n", " ")
-    if len(output) > max_len:
-        preview += f"  ... ({len(output)} chars)"
-    return preview
+def _time_fmt(s: float) -> str:
+    if s < 1:   return f"{s*1000:.0f}ms"
+    if s < 60:  return f"{s:.1f}s"
+    m, sec = divmod(int(s), 60)
+    return f"{m}m{sec}s"
 
 
-# ═══════════════════════════════════════════════════════════
-# AgentLoopDisplay — 主 agent 循环渲染
-# ═══════════════════════════════════════════════════════════
+def _escape_markup(text: str) -> str:
+    """Escape [ so Rich doesn't parse it as markup. ] is safe on its own."""
+    return text.replace("[", "\\[")
+
+
+def _format_output(output: str, max_lines: int = 20) -> str:
+    """Prepare tool output for display: sanitize, limit lines, wrap long lines."""
+    clean = _safe(output)
+    lines = clean.splitlines()
+    # Limit total lines
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines.append(f"... ({len(clean.splitlines()) - max_lines} more lines, {len(output)} chars total)")
+    # Wrap long lines
+    wrapped = []
+    tw = _term_width() - 12  # leave room for panel padding
+    for ln in lines:
+        if len(ln) > tw:
+            wrapped.extend(textwrap.wrap(ln, width=tw) or [ln])
+        else:
+            wrapped.append(ln)
+    return _escape_markup("\n".join(wrapped))
+
+
+def _term_width() -> int:
+    try:
+        return max(60, min(os.get_terminal_size().columns, 140))
+    except OSError:
+        return 100
+
+
+# ============================================================
+# Todo tree rendering
+# ============================================================
+
+def _render_todo_inline(output: str) -> None:
+    """Parse todo_write output and print a compact status tree."""
+    clean = _safe(output)
+    icons = {"pending": " [ ]", "in_progress": " [>]", "completed": " [x]"}
+    colors = {"pending": T.DIM, "in_progress": T.YELLOW, "completed": T.GREEN}
+    any_found = False
+    for ln in clean.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("Tasks") or ln.startswith("No"):
+            continue
+        for status in ("completed", "in_progress", "pending"):
+            needle = f"[{status}]"
+            if needle in ln:
+                idx = ln.index(needle)
+                tail = ln[idx + len(needle):].strip()
+                if tail and tail[0].isdigit() and ':' in tail:
+                    tail = tail.split(':', 1)[-1].strip()
+                console.print(
+                    Text(f"    {icons[status]} ", style=colors[status]) +
+                    Text(_escape_markup(tail), style=colors[status])
+                )
+                any_found = True
+                break
+    if not any_found:
+        for ln in clean.splitlines()[:10]:
+            console.print(f"    [dim]{_escape_markup(_trunc(ln, 80))}[/]")
+
+
+# ============================================================
+# AgentLoopDisplay
+# ============================================================
 
 class AgentLoopDisplay:
-    """主 Agent 循环的终端渲染器。"""
 
     def __init__(self):
-        self._round_start: float = 0.0
+        self._t0: float = 0.0
+        self._prev: float = 0.0
 
-    # ── 欢迎横幅 ────────────────────────────────────────
+    # ── welcome ──
     def show_welcome(self, model: str) -> None:
         console.print()
         console.print(Panel(
-            f"[bold cyan]🤖 Agent Loop[/]  —  [magenta]{model}[/]",
+            f"[bold cyan]Agent Loop[/]  |  [magenta]{model}[/]\n"
+            f"[dim]plan > delegate > execute   |   q / exit / Ctrl+C to quit[/]",
             border_style="cyan",
             box=box.ROUNDED,
             padding=(0, 2),
         ))
-        console.print(f"  [dim]输入问题回车发送，输入 q 退出[/]")
         console.print()
 
-    # ── 轮次标题 ────────────────────────────────────────
+    # ── round header ──
     def show_round_header(self, n: int) -> None:
-        self._round_start = time.time()
+        self._t0 = time.time()
         console.print()
-        # 用一条水平线 + 标题 代替原来的粗框
-        text = Text()
-        text.append("─" * 56, style=Theme.RULE)
-        text.append(f"\n🔄 Round {n}", style=Theme.TITLE)
-        console.print(text)
+        tag = f"Round {n}"
+        if self._prev > 0:
+            tag += f"  [dim](last {_time_fmt(self._prev)})[/]"
+        console.print(Rule(tag, style="cyan", align="center"))
 
-    # ── 模型思考 spinner ───────────────────────────────
-    def model_thinking(self, label: str = "模型思考中") -> Status:
-        """返回一个 Rich Status context manager，包裹 API 调用。
+    # ── thinking spinner ──
+    def model_thinking(self) -> Status:
+        return console.status("[yellow]Thinking...[/]", spinner="dots")
 
-        用法:
-            with agent_display.model_thinking():
-                response = client.chat.completions.create(...)
-        """
-        return console.status(
-            f"[yellow]⏳ {label}...[/]",
-            spinner="dots",
-        )
-
-    # ── 模型回复 ────────────────────────────────────────
+    # ── model response ──
     def show_model_response(self, finish_reason: str, content: Optional[str],
-                            elapsed: float, agent_label: str = "模型回复") -> None:
-        """显示模型返回的 finish_reason、文本内容、耗时。"""
-        reason_style = Theme.SUCCESS if finish_reason == "stop" else Theme.MODEL
-        line = Text()
-        line.append(f"💬 {agent_label}", style=Theme.BOLD)
-        line.append("  ·  ", style=Theme.DIM)
-        line.append(finish_reason, style=reason_style)
-        line.append(f"  ·  {elapsed:.1f}s", style=Theme.DIM)
-        console.print(line)
+                            elapsed: float) -> None:
+        if finish_reason == "stop":
+            reason, rcolor = "stop", T.GREEN
+        else:
+            reason, rcolor = "tool_calls", T.YELLOW
 
-        if content:
-            console.print(Panel(
-                content[:600],
-                title="Response",
-                title_align="left",
-                border_style=Theme.DIM,
-                padding=(0, 1),
-            ))
+        console.print(Text(f"LLM {reason}  {_time_fmt(elapsed)}",
+                          style=f"bold {rcolor}"))
 
-    # ── 工具调用清单 ────────────────────────────────────
+        if content and content.strip():
+            lines = [l for l in content.splitlines() if l.strip()]
+            preview = "\n".join(lines[:4])
+            if len(lines) > 4:
+                preview += f"\n[dim]... ({len(lines)} lines)[/]"
+            console.print(Panel(preview, title="Thought", title_align="left",
+                                border_style=T.DIM, box=box.SIMPLE, padding=(0, 1)))
+
+    # ── tool calls list ──
     def show_tool_calls(self, tool_calls: list) -> None:
-        """显示本轮所有工具调用的清单（一行一个）。"""
         if not tool_calls:
             return
-        console.print(Text("🔧 工具调用", style=Theme.BOLD))
-
-        for tc in tool_calls:
+        console.print()  # spacing
+        for i, tc in enumerate(tool_calls, 1):
             name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
             except Exception:
                 args = {}
-            arg_str = _tool_arg_preview(args)
-            if name == "spawn_task":
-                console.print(f"  🐳 [magenta]spawn_task[/] → [dim]{arg_str}[/]")
-            else:
-                console.print(f"  · [blue]{name}[/][dim]({arg_str})[/]")
+            label, color, _ = TOOL_META.get(name, (name, T.DIM, T.DIM))
+            arg = _arg_str(args)
+            console.print(
+                Text(f"[{i}]  ", style=T.DIM) +
+                Text(label, style=f"bold {color}") +
+                Text(f"  {_trunc(arg, 70)}", style=T.DIM)
+            )
 
-    # ── 单个工具结果 ────────────────────────────────────
+    # ── single tool result ──
     def show_tool_result(self, name: str, args: dict, output: str,
                          label: str = "", success: bool = True) -> None:
-        """显示单个工具的执行结果（一行摘要）。"""
-        icon = "✓" if success else "✗"
-        style = Theme.SUCCESS if success else Theme.ERROR
-        arg_str = _tool_arg_preview(args)
+        tool_label, tool_color, border_color = TOOL_META.get(
+            name, (name, T.DIM, T.DIM))
+        arg = _arg_str(args)
+        status_tag = "OK" if success else "FAIL"
+        status_color = T.GREEN if success else T.RED
 
-        line = Text()
+        # Header line
+        hdr = Text()
+        hdr.append(f"[{status_tag}] ", style=f"bold {status_color}")
+        hdr.append(f"{tool_label}  ", style=f"bold {tool_color}")
+        hdr.append(arg, style=T.DIM)
         if label:
-            line.append(f"  {label} {icon} ", style=style)
-        else:
-            line.append(f"  {icon} ", style=style)
-        line.append(name, style=Theme.TOOL)
-        line.append(f" → [dim]{arg_str}[/]")
+            hdr.append(f"  [{label}]", style=T.YELLOW)
+        console.print(hdr)
 
-        preview = _output_preview(output)
-        line.append(f"\n    ↳ [dim]{preview}[/]")
-        console.print(line)
+        # Output body — show in colored panel (except todo: tree is better)
+        if output and name != "todo_write":
+            body = _format_output(output)
+            if body.strip():
+                bcol = T.RED if not success else border_color
+                console.print(Panel(
+                    body,
+                    border_style=bcol,
+                    box=box.SIMPLE,
+                    padding=(0, 1),
+                ))
 
-    # ── 轮次结束 ────────────────────────────────────────
+        # Special: render todo tree after the panel
+        if name == "todo_write" and success:
+            _render_todo_inline(output)
+
+    # ── round end ──
     def show_round_end(self) -> None:
-        elapsed = time.time() - self._round_start if self._round_start else 0
-        console.print(f"  [dim]继续下一轮 ({elapsed:.1f}s)...[/]")
+        self._prev = time.time() - self._t0 if self._t0 else 0
 
-    # ── 最终回复 ────────────────────────────────────────
+    # ── final answer ──
     def show_final_answer(self, content: str) -> None:
         console.print()
-        console.print(Panel(
-            content,
-            title="🤖 Final Answer",
-            title_align="left",
-            border_style="cyan",
-            box=box.ROUNDED,
-        ))
-        console.print("─" * 56, style=Theme.RULE)
+        console.print(Rule("Done", style="cyan", align="center"))
+        console.print(Panel(content, border_style="cyan", box=box.ROUNDED, padding=(0, 2)))
         console.print()
 
-    # ── 退出 ────────────────────────────────────────────
+    # ── goodbye ──
     def show_goodbye(self) -> None:
-        console.print("  [dim]👋 Goodbye[/]")
+        console.print("\n  [dim]Bye.[/]\n")
 
 
-# ═══════════════════════════════════════════════════════════
-# SubAgentTracker — 子 agent 执行过程的数据记录
-# ═══════════════════════════════════════════════════════════
+# ============================================================
+# SubAgentTracker
+# ============================================================
 
 class SubAgentTracker:
-    """记录子 agent 的执行过程。"""
-
     def __init__(self, description: str):
         self.description = description
-        self.rounds: int = 0
-        self.tool_count: int = 0
-        self.tool_logs: list[dict] = []   # [{round, name, args, output}]
-        self._start: float = time.time()
-        self.status: str = "running"       # running | done | error
+        self.rounds = 0
+        self.tool_count = 0
+        self.tool_logs: list[dict] = []
+        self._start = time.time()
 
     def add_round(self, tool_calls: list[dict]) -> None:
-        """记录一轮工具调用。tool_calls 格式: [{name, args, output}, ...]"""
         self.rounds += 1
         for tc in tool_calls:
             self.tool_count += 1
@@ -252,55 +321,71 @@ class SubAgentTracker:
         return time.time() - self._start
 
 
-# ═══════════════════════════════════════════════════════════
-# SubAgentDisplay — 子 agent 渲染
-# ═══════════════════════════════════════════════════════════
+# ============================================================
+# SubAgentDisplay
+# ============================================================
 
 class SubAgentDisplay:
-    """子 Agent 的终端渲染器（摘要 + 可折叠日志）。"""
 
     def start(self, description: str) -> SubAgentTracker:
-        """开始追踪一个子 agent，打印启动行。"""
         tracker = SubAgentTracker(description)
-        console.print(f"  🐳 [magenta]子Agent: {description}[/] [dim]⏳ 启动...[/]")
+        console.print()
+        console.print(Panel(
+            f"[bold magenta]SubAgent[/]  [dim]|[/]  {description}",
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(0, 2),
+        ))
         return tracker
 
     def finish(self, tracker: SubAgentTracker, result: Optional[str]) -> None:
-        """子 agent 执行完毕，打印摘要 + 工具调用树 + 返回值预览。"""
-        elapsed = tracker.elapsed
         ok = result is not None
+        tag = "DONE" if ok else "WARN"
+        tcolor = T.GREEN if ok else T.RED
 
-        # ── 摘要行 ──
+        console.print()
         summary = Text()
-        summary.append(f"     {'✅' if ok else '⚠️'} 完成", style=Theme.SUCCESS if ok else Theme.ERROR)
-        summary.append(f"  ·  {tracker.rounds} 轮", style=Theme.DIM)
-        summary.append(f"  ·  {tracker.tool_count} 次工具调用", style=Theme.DIM)
-        summary.append(f"  ·  {elapsed:.1f}s", style=Theme.DIM)
+        summary.append(f"[{tag}] ", style=f"bold {tcolor}")
+        summary.append(f"{tracker.rounds} rounds", style=T.BOLD)
+        summary.append(f"  {tracker.tool_count} tools", style=T.DIM)
+        summary.append(f"  {_time_fmt(tracker.elapsed)}", style=T.DIM)
         console.print(summary)
 
-        # ── 可折叠工具调用树 ──
+        # Tool log tree
         if tracker.tool_logs:
-            tree = Tree(f"[dim]📋 详细日志 ({tracker.rounds} 轮)[/]", guide_style=Theme.DIM)
-            current_round = 0
-            round_node = None
+            tree = Tree("[dim]calls[/]", guide_style=T.DIM)
+            cur_round = 0
+            rnode = None
             for log in tracker.tool_logs:
-                if log["round"] != current_round:
-                    current_round = log["round"]
-                    round_node = tree.add(f"[dim]R{current_round}[/]", guide_style=Theme.DIM)
-                arg_str = _tool_arg_preview(log["args"])
-                if round_node is not None:
-                    round_node.add(f"[blue]{log['name']}[/] [dim]({arg_str})[/]")
+                if log["round"] != cur_round:
+                    cur_round = log["round"]
+                    rnode = tree.add(f"[bold]R{cur_round}[/]")
+                tl, tc, _ = TOOL_META.get(log["name"], (log["name"], T.DIM, T.DIM))
+                a = _trunc(_arg_str(log["args"]), 60)
+                out = _safe(log["output"])
+                m = f"{len(out.splitlines())}L {len(out)}C"
+                if rnode is not None:
+                    rnode.add(
+                        Text(tl, style=tc) +
+                        Text(f"  {a}  ", style=T.DIM) +
+                        Text(f"-> {m}", style=T.DIM)
+                    )
             console.print(tree)
 
-        # ── 返回值预览 ──
         if result:
-            preview = _truncate(result, 300)
-            console.print(f"     [dim]📤 返回:[/] {preview}")
+            console.print(Panel(
+                result[:300],
+                title="Return", title_align="left",
+                border_style=T.DIM,
+                box=box.SIMPLE,
+                padding=(0, 1),
+            ))
+        console.print()
 
 
-# ═══════════════════════════════════════════════════════════
-# 全局单例（其他模块 import 这些）
-# ═══════════════════════════════════════════════════════════
+# ============================================================
+# Global singletons
+# ============================================================
 
 agent_display = AgentLoopDisplay()
 subagent_display = SubAgentDisplay()
