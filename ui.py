@@ -1,59 +1,40 @@
 """
-UI module — Rich-based terminal rendering for the agent loop.
+UI module — pretty terminal output + session logging.
 
-Design:
-  - Rich Panels with color-coded borders per tool type
-  - Show full args and output content (not metrics-only)
-  - Todo output rendered as a formatted tree
-  - Clean round separation with Rule lines
+Terminal:  visual structure with Rule/Panel, color-coded tools, symbols
+Log file:  raw tool calls with args (logger.py)
 """
 
 import json
-import os
-import textwrap
 import time
 from typing import Optional
 
-from rich.console import Console, Group
-from rich.panel import Panel
+from rich.console import Console
 from rich.text import Text
-from rich.tree import Tree
-from rich.style import Style
+from rich.panel import Panel
 from rich import box
 from rich.status import Status
 from rich.rule import Rule
-from rich.columns import Columns
+
+from logger import logger
 
 console = Console()
 
 
 # ============================================================
-# Theme — color palette & tool metadata
+# Style constants
 # ============================================================
 
-class T:
-    """Theme shortcuts."""
-    CYAN    = "cyan"
-    GREEN   = "green"
-    RED     = "red"
-    YELLOW  = "yellow"
-    BLUE    = "blue"
-    MAGENTA = "magenta"
-    BRIGHT_CYAN = "bright_cyan"
-    DIM     = "bright_black"
-    BOLD    = "bold"
-    WHITE   = "white"
-
-# (label_str, color_str, border_color_str)
-TOOL_META = {
-    "bash":       ("bash",       T.BLUE,    "blue"),
-    "read_file":  ("read",       T.GREEN,   "green"),
-    "write_file": ("write",      T.GREEN,   "green"),
-    "edit_file":  ("edit",       T.GREEN,   "green"),
-    "glob":       ("glob",       T.BRIGHT_CYAN, "bright_cyan"),
-    "grep":       ("grep",       T.BRIGHT_CYAN, "bright_cyan"),
-    "todo_write": ("todo",       T.MAGENTA, "magenta"),
-    "spawn_task": ("spawn",      T.CYAN,    "cyan"),
+# Tool -> (label, color, symbol)
+TOOL = {
+    "bash":       ("bash",       "blue",         ">_"),
+    "read_file":  ("read_file",  "green",        "R "),
+    "write_file": ("write_file", "green",        "W "),
+    "edit_file":  ("edit_file",  "green",        "E "),
+    "glob":       ("glob",       "bright_cyan",  "* "),
+    "grep":       ("grep",       "bright_cyan",  "grep"),
+    "todo_write": ("todo",       "magenta",      "T "),
+    "spawn_task": ("spawn",      "cyan",         "S "),
 }
 
 
@@ -61,43 +42,24 @@ TOOL_META = {
 # Helpers
 # ============================================================
 
-def _trunc(text: str, n: int) -> str:
-    """Truncate to n chars, collapse newlines."""
-    s = text.replace("\n", " ").replace("\r", "")
-    if len(s) > n:
-        return s[:n-3] + "..."
-    return s
-
-
-def _safe(text: str) -> str:
-    """Strip Unicode replacement chars from decode errors."""
-    return text.replace('�', '')
-
-
-def _arg_str(args: dict) -> str:
-    """Human-readable one-liner for tool arguments."""
-    if "command" in args:
-        return args["command"]
-    if "path" in args:
-        return args["path"]
-    if "pattern" in args:
-        return args["pattern"]
-    if "description" in args:
-        return args["description"]
+def _arg_summary(args: dict) -> str:
+    for key in ("command", "path", "pattern", "description"):
+        if key in args:
+            val = str(args[key])
+            return val[:55] + "..." if len(val) > 55 else val
     if "todos" in args:
         items = args["todos"]
-        if not isinstance(items, list):
-            return "?"
-        c = {"pending": 0, "in_progress": 0, "completed": 0}
-        for t in items:
-            s = t.get("status", "")
-            if s in c: c[s] += 1
-        parts = []
-        if c["completed"]: parts.append(f"{c['completed']} done")
-        if c["in_progress"]: parts.append(f"{c['in_progress']} active")
-        if c["pending"]: parts.append(f"{c['pending']} pending")
-        return ", ".join(parts) if parts else "0"
-    return json.dumps(args, ensure_ascii=False)
+        if isinstance(items, list):
+            c = {"pending": 0, "in_progress": 0, "completed": 0}
+            for t in items:
+                s = t.get("status", "")
+                if s in c: c[s] += 1
+            parts = []
+            if c["in_progress"]: parts.append(f"{c['in_progress']} active")
+            if c["pending"]: parts.append(f"{c['pending']} pending")
+            if c["completed"]: parts.append(f"{c['completed']} done")
+            return ", ".join(parts) if parts else "0"
+    return json.dumps(args, ensure_ascii=False)[:40]
 
 
 def _time_fmt(s: float) -> str:
@@ -105,69 +67,6 @@ def _time_fmt(s: float) -> str:
     if s < 60:  return f"{s:.1f}s"
     m, sec = divmod(int(s), 60)
     return f"{m}m{sec}s"
-
-
-def _escape_markup(text: str) -> str:
-    """Escape [ so Rich doesn't parse it as markup. ] is safe on its own."""
-    return text.replace("[", "\\[")
-
-
-def _format_output(output: str, max_lines: int = 20) -> str:
-    """Prepare tool output for display: sanitize, limit lines, wrap long lines."""
-    clean = _safe(output)
-    lines = clean.splitlines()
-    # Limit total lines
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines.append(f"... ({len(clean.splitlines()) - max_lines} more lines, {len(output)} chars total)")
-    # Wrap long lines
-    wrapped = []
-    tw = _term_width() - 12  # leave room for panel padding
-    for ln in lines:
-        if len(ln) > tw:
-            wrapped.extend(textwrap.wrap(ln, width=tw) or [ln])
-        else:
-            wrapped.append(ln)
-    return _escape_markup("\n".join(wrapped))
-
-
-def _term_width() -> int:
-    try:
-        return max(60, min(os.get_terminal_size().columns, 140))
-    except OSError:
-        return 100
-
-
-# ============================================================
-# Todo tree rendering
-# ============================================================
-
-def _render_todo_inline(output: str) -> None:
-    """Parse todo_write output and print a compact status tree."""
-    clean = _safe(output)
-    icons = {"pending": " [ ]", "in_progress": " [>]", "completed": " [x]"}
-    colors = {"pending": T.DIM, "in_progress": T.YELLOW, "completed": T.GREEN}
-    any_found = False
-    for ln in clean.splitlines():
-        ln = ln.strip()
-        if not ln or ln.startswith("Tasks") or ln.startswith("No"):
-            continue
-        for status in ("completed", "in_progress", "pending"):
-            needle = f"[{status}]"
-            if needle in ln:
-                idx = ln.index(needle)
-                tail = ln[idx + len(needle):].strip()
-                if tail and tail[0].isdigit() and ':' in tail:
-                    tail = tail.split(':', 1)[-1].strip()
-                console.print(
-                    Text(f"    {icons[status]} ", style=colors[status]) +
-                    Text(_escape_markup(tail), style=colors[status])
-                )
-                any_found = True
-                break
-    if not any_found:
-        for ln in clean.splitlines()[:10]:
-            console.print(f"    [dim]{_escape_markup(_trunc(ln, 80))}[/]")
 
 
 # ============================================================
@@ -179,13 +78,16 @@ class AgentLoopDisplay:
     def __init__(self):
         self._t0: float = 0.0
         self._prev: float = 0.0
+        self._round: int = 0
 
     # ── welcome ──
     def show_welcome(self, model: str) -> None:
+        log_path = logger.open(model)
         console.print()
         console.print(Panel(
-            f"[bold cyan]Agent Loop[/]  |  [magenta]{model}[/]\n"
-            f"[dim]plan > delegate > execute   |   q / exit / Ctrl+C to quit[/]",
+            f"[bold cyan]Agent Loop[/]  |  [magenta bold]{model}[/]  |  "
+            f"[dim]q / exit / Ctrl+C[/]\n"
+            f"[dim]log: {log_path}[/]",
             border_style="cyan",
             box=box.ROUNDED,
             padding=(0, 2),
@@ -195,87 +97,71 @@ class AgentLoopDisplay:
     # ── round header ──
     def show_round_header(self, n: int) -> None:
         self._t0 = time.time()
-        console.print()
-        tag = f"Round {n}"
+        self._round = n
+        logger.log_round_header(n)
         if self._prev > 0:
-            tag += f"  [dim](last {_time_fmt(self._prev)})[/]"
-        console.print(Rule(tag, style="cyan", align="center"))
+            console.print(Rule(
+                f"[bold]Round {n}[/]  [dim]({_time_fmt(self._prev)})[/]",
+                style="cyan", align="center",
+            ))
+        else:
+            console.print(Rule(f"[bold]Round {n}[/]", style="cyan", align="center"))
 
-    # ── thinking spinner ──
+    # ── thinking ──
     def model_thinking(self) -> Status:
-        return console.status("[yellow]Thinking...[/]", spinner="dots")
+        return console.status(
+            f"[yellow]Round {self._round}  thinking...[/]",
+            spinner="dots",
+        )
 
     # ── model response ──
     def show_model_response(self, finish_reason: str, content: Optional[str],
                             elapsed: float) -> None:
-        if finish_reason == "stop":
-            reason, rcolor = "stop", T.GREEN
-        else:
-            reason, rcolor = "tool_calls", T.YELLOW
+        logger.log_model_response(finish_reason, elapsed)
+        is_stop = finish_reason == "stop"
+        color = "green" if is_stop else "yellow"
+        label = "STOP" if is_stop else "TOOLS"
+        console.print(f"  [bold {color}]{label}[/] [dim]{_time_fmt(elapsed)}[/]")
 
-        console.print(Text(f"LLM {reason}  {_time_fmt(elapsed)}",
-                          style=f"bold {rcolor}"))
-
-        if content and content.strip():
-            lines = [l for l in content.splitlines() if l.strip()]
-            preview = "\n".join(lines[:4])
-            if len(lines) > 4:
-                preview += f"\n[dim]... ({len(lines)} lines)[/]"
-            console.print(Panel(preview, title="Thought", title_align="left",
-                                border_style=T.DIM, box=box.SIMPLE, padding=(0, 1)))
-
-    # ── tool calls list ──
+    # ── tool calls (before execution) ──
     def show_tool_calls(self, tool_calls: list) -> None:
         if not tool_calls:
             return
-        console.print()  # spacing
-        for i, tc in enumerate(tool_calls, 1):
+        for tc in tool_calls:
             name = tc.function.name
+            raw = tc.function.arguments
+            if not isinstance(raw, str):
+                raw = json.dumps(raw, ensure_ascii=False)
+            logger.log_tool_call(name, raw)
+            # Terminal: symbol + colored name + dim args
+            label, color, sym = TOOL.get(name, (name, "white", "? "))
             try:
-                args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
+                args = json.loads(raw) if isinstance(raw, str) else raw
             except Exception:
                 args = {}
-            label, color, _ = TOOL_META.get(name, (name, T.DIM, T.DIM))
-            arg = _arg_str(args)
+            arg = _arg_summary(args)
             console.print(
-                Text(f"[{i}]  ", style=T.DIM) +
+                Text(f"  {sym} ", style="dim") +
                 Text(label, style=f"bold {color}") +
-                Text(f"  {_trunc(arg, 70)}", style=T.DIM)
+                Text(f"  {arg}", style="dim")
             )
 
-    # ── single tool result ──
+    # ── tool result (after execution) ──
     def show_tool_result(self, name: str, args: dict, output: str,
                          label: str = "", success: bool = True) -> None:
-        tool_label, tool_color, border_color = TOOL_META.get(
-            name, (name, T.DIM, T.DIM))
-        arg = _arg_str(args)
-        status_tag = "OK" if success else "FAIL"
-        status_color = T.GREEN if success else T.RED
+        logger.log_tool_result(name, success)
+        tag = "OK" if success else "FAIL"
+        sc = "green" if success else "red"
+        _, color, sym = TOOL.get(name, (name, "white", "? "))
+        arg = _arg_summary(args)
 
-        # Header line
-        hdr = Text()
-        hdr.append(f"[{status_tag}] ", style=f"bold {status_color}")
-        hdr.append(f"{tool_label}  ", style=f"bold {tool_color}")
-        hdr.append(arg, style=T.DIM)
-        if label:
-            hdr.append(f"  [{label}]", style=T.YELLOW)
-        console.print(hdr)
-
-        # Output body — show in colored panel (except todo: tree is better)
-        if output and name != "todo_write":
-            body = _format_output(output)
-            if body.strip():
-                bcol = T.RED if not success else border_color
-                console.print(Panel(
-                    body,
-                    border_style=bcol,
-                    box=box.SIMPLE,
-                    padding=(0, 1),
-                ))
-
-        # Special: render todo tree after the panel
-        if name == "todo_write" and success:
-            _render_todo_inline(output)
+        console.print(
+            Text(f"  [{tag}] ", style=f"bold {sc}") +
+            Text(sym, style="dim") +
+            Text(name, style=color) +
+            Text(f"  {arg}", style="dim") +
+            (Text(f"  {label}", style="yellow") if label else Text(""))
+        )
 
     # ── round end ──
     def show_round_end(self) -> None:
@@ -283,6 +169,7 @@ class AgentLoopDisplay:
 
     # ── final answer ──
     def show_final_answer(self, content: str) -> None:
+        logger.log_final_answer(content)
         console.print()
         console.print(Rule("Done", style="cyan", align="center"))
         console.print(Panel(content, border_style="cyan", box=box.ROUNDED, padding=(0, 2)))
@@ -290,7 +177,8 @@ class AgentLoopDisplay:
 
     # ── goodbye ──
     def show_goodbye(self) -> None:
-        console.print("\n  [dim]Bye.[/]\n")
+        logger.close()
+        console.print(f"\n  [dim]log -> {logger.file_path}[/]\n")
 
 
 # ============================================================
@@ -313,7 +201,7 @@ class SubAgentTracker:
                 "round": self.rounds,
                 "name": tc.get("name", "?"),
                 "args": tc.get("args", {}),
-                "output": tc.get("output", ""),
+                "args_raw": tc.get("args_raw", ""),
             })
 
     @property
@@ -329,58 +217,33 @@ class SubAgentDisplay:
 
     def start(self, description: str) -> SubAgentTracker:
         tracker = SubAgentTracker(description)
-        console.print()
-        console.print(Panel(
-            f"[bold magenta]SubAgent[/]  [dim]|[/]  {description}",
-            border_style="magenta",
-            box=box.ROUNDED,
-            padding=(0, 2),
-        ))
+        logger.log_subagent_start(description)
+        desc_short = description[:55] + "..." if len(description) > 55 else description
+        console.print(
+            Text("  [sub] ", style="dim") +
+            Text(desc_short, style="magenta")
+        )
         return tracker
 
     def finish(self, tracker: SubAgentTracker, result: Optional[str]) -> None:
+        for log in tracker.tool_logs:
+            raw = log.get("args_raw", "")
+            if not raw:
+                raw = json.dumps(log["args"], ensure_ascii=False)
+            logger.log_subagent_tool(log["name"], raw)
+
+        logger.log_subagent_finish(tracker.rounds, tracker.tool_count,
+                                   tracker.elapsed)
+
         ok = result is not None
-        tag = "DONE" if ok else "WARN"
-        tcolor = T.GREEN if ok else T.RED
+        tag = "OK" if ok else "FAIL"
+        sc = "green" if ok else "red"
 
-        console.print()
-        summary = Text()
-        summary.append(f"[{tag}] ", style=f"bold {tcolor}")
-        summary.append(f"{tracker.rounds} rounds", style=T.BOLD)
-        summary.append(f"  {tracker.tool_count} tools", style=T.DIM)
-        summary.append(f"  {_time_fmt(tracker.elapsed)}", style=T.DIM)
-        console.print(summary)
-
-        # Tool log tree
-        if tracker.tool_logs:
-            tree = Tree("[dim]calls[/]", guide_style=T.DIM)
-            cur_round = 0
-            rnode = None
-            for log in tracker.tool_logs:
-                if log["round"] != cur_round:
-                    cur_round = log["round"]
-                    rnode = tree.add(f"[bold]R{cur_round}[/]")
-                tl, tc, _ = TOOL_META.get(log["name"], (log["name"], T.DIM, T.DIM))
-                a = _trunc(_arg_str(log["args"]), 60)
-                out = _safe(log["output"])
-                m = f"{len(out.splitlines())}L {len(out)}C"
-                if rnode is not None:
-                    rnode.add(
-                        Text(tl, style=tc) +
-                        Text(f"  {a}  ", style=T.DIM) +
-                        Text(f"-> {m}", style=T.DIM)
-                    )
-            console.print(tree)
-
-        if result:
-            console.print(Panel(
-                result[:300],
-                title="Return", title_align="left",
-                border_style=T.DIM,
-                box=box.SIMPLE,
-                padding=(0, 1),
-            ))
-        console.print()
+        console.print(
+            Text(f"  [{tag}] sub ", style=f"bold {sc}") +
+            Text(f"{tracker.rounds}r/{tracker.tool_count}t", style="dim") +
+            Text(f"  {_time_fmt(tracker.elapsed)}", style="dim")
+        )
 
 
 # ============================================================

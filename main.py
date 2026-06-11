@@ -11,6 +11,7 @@ from hooks import hooks, ToolUseEvent, ToolResultEvent
 from tools import TOOLS, TOOL_HANDLERS
 from config import WORKDIR
 from ui import agent_display, subagent_display, console
+from logger import logger
 
 load_dotenv(override=True)
 
@@ -150,7 +151,8 @@ if __name__ == "__main__":
     agent_display.show_welcome(MODEL)
 
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tools.TASK_FILE = WORKDIR / "todos" / f"todos_{session_ts}.json"
+    todo_file = WORKDIR / "todos" / f"todos_{session_ts}.json"
+    tools.TASK_FILE = todo_file
 
     messages = [
         {"role": "system", "content": SYSTEM},
@@ -166,5 +168,7 @@ if __name__ == "__main__":
             agent_display.show_goodbye()
             break
 
+        logger.log_user_message(query)
         messages.append({"role": "user", "content": query})
         agent_loop(messages)
+

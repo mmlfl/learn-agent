@@ -500,7 +500,11 @@ def run_spawn_task(**kwargs) -> str | None:
                     "tool_call_id": tc.id,
                     "content": f"{output}",
                 })
-                round_logs.append({"name": name, "args": args, "output": output})
+                round_logs.append({
+                    "name": name,
+                    "args": args,
+                    "args_raw": tc.function.arguments if isinstance(tc.function.arguments, str) else json.dumps(tc.function.arguments, ensure_ascii=False),
+                })
 
         # 将本轮工具调用记录到 tracker
         if round_logs:
