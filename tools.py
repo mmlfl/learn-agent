@@ -472,8 +472,15 @@ def run_spawn_task(**kwargs) -> str | None:
             for tc in choice.message.tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments
-                if isinstance(args, str):
-                    args = json.loads(args)
+                try:
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                except Exception:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"[Blocked] {args} this is wrong,please try this again",
+                    })
 
                 hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
                     tool_name=name,

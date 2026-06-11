@@ -94,7 +94,13 @@ def agent_loop(messages: list):
                 if isinstance(args, str):
                     args = json.loads(args)
             except Exception:
-                pass
+                messages.append({
+                    "role":"tool",
+                    "tool_call_id": tc.id,
+                    "content": "you pass the wrong arguments to this tool,please try again to delivery"
+                               "the correct arguments"
+                })
+                continue
             name = tc.function.name
 
             # Hook: 执行前校验
@@ -166,9 +172,12 @@ if __name__ == "__main__":
 
         if query.strip().lower() in ("q", "exit", ""):
             agent_display.show_goodbye()
+            if todo_file.exists():
+                todo_file.unlink()
             break
 
         logger.log_user_message(query)
         messages.append({"role": "user", "content": query})
         agent_loop(messages)
-
+        if todo_file.exists():
+            todo_file.unlink()
