@@ -498,6 +498,7 @@ def run_spawn_task(**kwargs) -> str | None:
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": f"[Blocked] {args} this is wrong,please try this again",
+                        "name": name
                     })
 
                 hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
@@ -510,6 +511,7 @@ def run_spawn_task(**kwargs) -> str | None:
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": f"[Blocked] {hook_result}",
+                        "name": name
                     })
                     round_logs.append({"name": name, "args": args, "output": f"[Blocked] {hook_result}"})
                     continue
@@ -524,6 +526,7 @@ def run_spawn_task(**kwargs) -> str | None:
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": f"{output}",
+                    "name": name
                 })
                 round_logs.append({
                     "name": name,

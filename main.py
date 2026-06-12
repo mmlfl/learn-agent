@@ -91,6 +91,7 @@ def agent_loop(messages: list):
         # ── 6. 执行工具 ──
         for tc in choice.message.tool_calls:
             args = tc.function.arguments
+            name = tc.function.name
             try:
                 if isinstance(args, str):
                     args = json.loads(args)
@@ -99,10 +100,10 @@ def agent_loop(messages: list):
                     "role":"tool",
                     "tool_call_id": tc.id,
                     "content": "you pass the wrong arguments to this tool,please try again to delivery"
-                               "the correct arguments"
+                               "the correct arguments",
+                    "name": name
                 })
                 continue
-            name = tc.function.name
 
             # Hook: 执行前校验
             hook_result = hooks.trigger("PreToolUse", ToolUseEvent(
@@ -119,6 +120,7 @@ def agent_loop(messages: list):
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": f"[Blocked] {hook_result}",
+                    "name": name
                 })
                 continue
 
@@ -145,6 +147,7 @@ def agent_loop(messages: list):
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": output,
+                "name": name
             })
 
         round_num += 1
