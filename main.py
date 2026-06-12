@@ -8,6 +8,7 @@ from openai import OpenAI
 
 import tools
 from hooks import hooks, ToolUseEvent, ToolResultEvent
+from skill_loader import SKILL_SYSTEM
 from tools import TOOLS, TOOL_HANDLERS
 from config import WORKDIR
 from ui import agent_display, subagent_display, console
@@ -157,11 +158,12 @@ if __name__ == "__main__":
     agent_display.show_welcome(MODEL)
 
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    todo_file = WORKDIR / "todos" / f"todos_{session_ts}.json"
+    todo_file = WORKDIR / f"todos_{session_ts}.json"
     tools.TASK_FILE = todo_file
 
     messages = [
         {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": SKILL_SYSTEM},
     ]
 
     while True:

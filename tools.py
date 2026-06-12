@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from hooks import hooks, ToolUseEvent
 from config import WORKDIR
+from skill_loader import SKILL_REGISTRY
 from ui import subagent_display, console
 TASK_FILE = Path()
 
@@ -163,6 +164,23 @@ TOOLS = [
                     }
                 },
                 "required": ["description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "if a skill is suitable for this task, load the skill and return it ",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "the skill's name which you need"
+                    }
+                },
+                "required": ["name"]
             }
         }
     },
@@ -523,9 +541,19 @@ def run_spawn_task(**kwargs) -> str | None:
     subagent_display.finish(tracker, result)
     return result
 
+def run_load_skill(**kwargs) -> str | None:
+    name = kwargs.get("name","no input")
+    if name == "no input":
+        return "Wrong arguments,please try again"
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return "No such skill"
+    if skill.get("enabled", True) == False:
+        return "Skill disabled"
+    return skill.get("content")
 
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
-    "spawn_task": run_spawn_task,
+    "spawn_task": run_spawn_task,"load_skill":run_load_skill,
 }
