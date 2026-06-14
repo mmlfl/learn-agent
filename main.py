@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import tools
+from compact import compact_layer1, compact_layer2, tool_result_budget, reactive_compact
 from hooks import hooks, ToolUseEvent, ToolResultEvent
 from memory import build_memory_system, extract_memories, load_memories, consolidate_memories
 from skill_loader import SKILL_SYSTEM
@@ -43,28 +44,50 @@ Always work one subtask at a time."""
 
 
 # ── Agent 循环 ──────────────────────────────────────────────
+MAX_REACTIVE_RETRIES = 1
+
 def agent_loop(messages: list):
     """
     完整的 Agent 循环：
     用户消息 → 模型决策 → 工具调用 → 结果返回 → 最终回复
     """
     round_num = 1
+    reactive_retries = 0
 
     while True:
+        #第一层压缩
+        messages = compact_layer1(messages)
+        #第二层压缩
+        messages = compact_layer2(messages)
         # ── 轮次标题 ──
         agent_display.show_round_header(round_num)
 
         # ── 1. 调用模型（带 spinner） ──
         t0 = time.time()
-        with agent_display.model_thinking():
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                max_completion_tokens=4000,
-            )
+        try:
+            with agent_display.model_thinking():
+                response = client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    max_completion_tokens=4000,
+                )
+        except Exception as e:
+            err_msg = str(e).lower()
+            if ("too_long" in err_msg or "too many tokens" in err_msg
+                    or "maximum context" in err_msg):
+                if reactive_retries < MAX_REACTIVE_RETRIES:
+                    messages[:] = reactive_compact(messages)
+                    reactive_retries += 1
+                    continue
+                raise RuntimeError(
+                    f"应急压缩重试 {MAX_REACTIVE_RETRIES} 次后仍失败，"
+                    f"请使用 /clear 或新会话重试"
+                ) from e
+            raise
         elapsed = time.time() - t0
+        reactive_retries = 0  # 调用成功，重置计数
         choice = response.choices[0]
 
         # ── 2. 显示模型回复 ──
@@ -136,7 +159,7 @@ def agent_loop(messages: list):
                 output = handler(**args)
                 agent_display.show_tool_result(name, args, output,
                                                success=not output.startswith("Error"))
-
+            output = tool_result_budget(output, tc.id, name=name, args=args)
             # Hook: 执行后
             hooks.trigger("PostToolUse", ToolResultEvent(
                 tool_name=name,

@@ -167,6 +167,12 @@ class AgentLoopDisplay:
     def show_round_end(self) -> None:
         self._prev = time.time() - self._t0 if self._t0 else 0
 
+    # ── compact ──
+    def show_compact(self, layer: str, detail: str) -> None:
+        """Show compaction event."""
+        logger.log_compact(layer, detail)
+        console.print(f"  [dim][compact][/] [yellow]L{layer}[/] {detail}")
+
     # ── final answer ──
     def show_final_answer(self, content: str) -> None:
         logger.log_final_answer(content)

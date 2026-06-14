@@ -114,6 +114,10 @@ class SessionLogger:
         self._w(f"> {emoji} **{tag}**")
         self._w("")
 
+    def log_compact(self, layer: str, detail: str) -> None:
+        self._w(f"> 📦 **Compact L{layer}**: {detail}")
+        self._w("")
+
     def log_final_answer(self, content: str) -> None:
         self._w("---")
         self._w("")

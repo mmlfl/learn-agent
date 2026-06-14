@@ -5,7 +5,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from hooks import hooks, ToolUseEvent
-from config import WORKDIR
+from config import WORKDIR, TOOL_RESULTS_DIR
 from skill_loader import SKILL_REGISTRY
 from ui import subagent_display, console
 TASK_FILE = Path()
@@ -222,6 +222,12 @@ def run_read(**kwargs) -> str:
     limit = kwargs.get("limit", 10000)
 
     try:
+        if safe_path(path).is_relative_to(TOOL_RESULTS_DIR):
+            return (
+                f"[Notice] This file was persisted because it was too large for context.\n"
+                f"Re-reading it in full will cause the same truncation.\n"
+                f"Use bash with grep/head/tail to search specific parts."
+            )
         # 🔧 指定 UTF-8 编码读取文件
         content = safe_path(path).read_text(encoding='utf-8')
         lines = content.splitlines()
