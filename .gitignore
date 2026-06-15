@@ -25,3 +25,5 @@ venv/
 todos_*.json
 /todos
 /logs
+
+/memory

@@ -8,6 +8,7 @@ from openai import OpenAI
 
 import tools
 from hooks import hooks, ToolUseEvent, ToolResultEvent
+from memory import build_memory_system, extract_memories, load_memories, consolidate_memories
 from skill_loader import SKILL_SYSTEM
 from tools import TOOLS, TOOL_HANDLERS
 from config import WORKDIR
@@ -82,6 +83,8 @@ def agent_loop(messages: list):
 
         # ── 4. 如果没有工具调用，结束 ──
         if choice.finish_reason != "tool_calls":
+            extract_memories(messages)
+            consolidate_memories()
             agent_display.show_final_answer(choice.message.content or "")
             return
 
@@ -97,7 +100,7 @@ def agent_loop(messages: list):
                     args = json.loads(args)
             except Exception:
                 messages.append({
-                    "role":"tool",
+                    "role": "tool",
                     "tool_call_id": tc.id,
                     "content": "you pass the wrong arguments to this tool,please try again to delivery"
                                "the correct arguments",
@@ -164,12 +167,17 @@ if __name__ == "__main__":
     todo_file = WORKDIR / f"todos_{session_ts}.json"
     tools.TASK_FILE = todo_file
 
+    memory_system = build_memory_system()
+
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "system", "content": SKILL_SYSTEM},
+        {"role": "system", "content": memory_system},
     ]
 
     while True:
+        memory_system = build_memory_system()
+        messages[2] = {"role": "system", "content": memory_system}
         try:
             query = console.input(f"\n[yellow bold]👤 你:[/] ")
         except (EOFError, KeyboardInterrupt):
@@ -183,6 +191,10 @@ if __name__ == "__main__":
 
         logger.log_user_message(query)
         messages.append({"role": "user", "content": query})
+        #执行前,先进行相关记忆注入
+        load_memories(messages)
+
         agent_loop(messages)
+
         if todo_file.exists():
             todo_file.unlink()
