@@ -130,8 +130,6 @@ def tool_result_budget(output: str, tool_call_id: str,
     if len(output) < PERSIST_THRESHOLD:
         return output
 
-    TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
     # 生成可读文件名: {tool_name}_{arg_hint}_{id前8位}.txt
     arg_hint = ""
     if args:
