@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from config import TOOL_RESULTS_DIR
+from config import TOOL_RESULTS_DIR, SYSTEM_MESSAGES_LEN
 from ui import agent_display
 
 LAYER1_LEN = 30
@@ -47,8 +47,8 @@ def compact_layer2(messages: list):
         return messages
 
     before_chars = len(str(messages))
-    system_headers = messages[0:2]
-    conversation = json.dumps(messages[2:], ensure_ascii=False, default=str)
+    system_headers = messages[0:SYSTEM_MESSAGES_LEN]
+    conversation = json.dumps(messages[SYSTEM_MESSAGES_LEN:], ensure_ascii=False, default=str)
 
     COMPACT_PROMPT = (
         "You are a conversation compressor. Summarize the agent conversation below "
@@ -91,9 +91,9 @@ def reactive_compact(messages: list) -> list:
     保留 system_headers + LLM 摘要 + 最后 5 条消息（保留当前对话骨架）。
     """
     before_chars = len(str(messages))
-    system_headers = messages[0:2]
+    system_headers = messages[0:SYSTEM_MESSAGES_LEN]
     tail = messages[-5:]
-    conversation = json.dumps(messages[2:-5], ensure_ascii=False, default=str)
+    conversation = json.dumps(messages[SYSTEM_MESSAGES_LEN:-5], ensure_ascii=False, default=str)
 
     prompt = (
         "Emergency summary. The conversation is too long for the context window.\n"
