@@ -8,13 +8,13 @@ from openai import OpenAI
 
 import tools
 from compact import compact_layer1, compact_layer2, tool_result_budget, reactive_compact
-from hooks import hooks, ToolUseEvent, ToolResultEvent
-from memory import build_memory_system, extract_memories, load_memories, consolidate_memories
-from skill_loader import SKILL_SYSTEM
-from tools import TOOLS, TOOL_HANDLERS
 from config import WORKDIR
-from ui import agent_display, subagent_display, console
+from hooks import hooks, ToolUseEvent, ToolResultEvent
 from logger import logger
+from memory import build_memory_system, extract_memories, load_memories, consolidate_memories
+from prompt import get_static_system_messages
+from tools import TOOLS, TOOL_HANDLERS
+from ui import agent_display, console
 
 load_dotenv(override=True)
 
@@ -23,24 +23,6 @@ client = OpenAI(
     base_url=os.getenv("DASHSCOPE_BASE_URL"),
 )
 MODEL = os.getenv("MODEL_NAME", "qwen-vl-plus")
-
-SYSTEM = f"""You are a coding agent at {os.getcwd()} on Windows. You have access to tools and subagents.
-
-## Task Workflow
-
-When the user gives you a complex task:
-
-1. **Plan at the goal level** — call todo_write to break the task into 2-5 meaningful subtasks. Each subtask should be a complete goal (e.g. "understand all source files"), NOT a single operation (e.g. "read main.py"). Avoid micro-tasking.
-
-2. **Execute each subtask** — for the current subtask, decide:
-   - If it requires multiple operations (reading several files, running commands then analyzing) → use `spawn_task` to delegate to a subagent
-   - If it's a single operation (read one known file, run one command) → do it yourself
-
-3. **Mark progress** — when a subtask is complete, use todo_write to mark it completed and move the next one to in_progress
-
-4. **Repeat** until all subtasks are done, then deliver the final answer.
-
-Always work one subtask at a time."""
 
 
 # ── Agent 循环 ──────────────────────────────────────────────
@@ -188,21 +170,19 @@ def agent_loop(messages: list):
 if __name__ == "__main__":
     agent_display.show_welcome(MODEL)
 
+    #每次对话开启 创建任务规划文件
     session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     todo_file = WORKDIR / f"todos_{session_ts}.json"
     tools.TASK_FILE = todo_file
 
-    memory_system = build_memory_system()
-
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "system", "content": SKILL_SYSTEM},
-        {"role": "system", "content": memory_system},
-    ]
+    messages = get_static_system_messages()
+    MEMORY_INDEX = len(messages)
+    messages.append({})
 
     while True:
+        #获取动态记忆,由于对话的执行,用户可能会存储更新记忆
         memory_system = build_memory_system()
-        messages[2] = {"role": "system", "content": memory_system}
+        messages[MEMORY_INDEX] = {"role": "system", "content": memory_system}
         try:
             query = console.input(f"\n[yellow bold]👤 你:[/] ")
         except (EOFError, KeyboardInterrupt):
@@ -221,5 +201,6 @@ if __name__ == "__main__":
 
         agent_loop(messages)
 
+        #一轮对话结束 删除可能存在的任务规划文件
         if todo_file.exists():
             todo_file.unlink()

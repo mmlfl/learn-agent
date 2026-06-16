@@ -51,4 +51,4 @@ def build_skill_system() -> str:
         "Use load_skill to get full details when needed."
     )
 
-SKILL_SYSTEM = build_skill_system()
+SYSTEM_SKILL = build_skill_system()

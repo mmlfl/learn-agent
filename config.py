@@ -11,3 +11,5 @@ MEMORY_INDEX = MEMORY_DIR / 'MEMORY.md'
 TOOL_RESULTS_DIR = WORKDIR / 'tools_budget_content'
 TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SYSTEM_MESSAGES_LEN = 3
+
+PROMPT_SECTIONS = {}
