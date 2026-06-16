@@ -55,8 +55,6 @@ def agent_loop(messages: list):
     reactive_retries = 0
 
     while True:
-        #第一层压缩
-        messages = compact_layer1(messages)
         #第二层压缩
         messages = compact_layer2(messages)
         # ── 轮次标题 ──
@@ -106,7 +104,11 @@ def agent_loop(messages: list):
 
         # ── 4. 如果没有工具调用，结束 ──
         if choice.finish_reason != "tool_calls":
+            # 第一层压缩
+            messages = compact_layer1(messages)
+            #一轮结束 看看能否提取记忆
             extract_memories(messages)
+            #如果记忆过多,执行修剪,重复合并等等
             consolidate_memories()
             agent_display.show_final_answer(choice.message.content or "")
             return

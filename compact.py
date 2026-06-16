@@ -17,27 +17,35 @@ COMPACT_CLIENT = OpenAI(
 )
 
 
+KEEP_TOOL_RESULTS = 2
+
 def compact_layer1(messages: list):
-    if len(messages) < LAYER1_LEN:
+    """第一层压缩：保留最后 KEEP_TOOL_RESULTS 条工具结果，其余替换为占位符。
+
+    不碰 system 头部、user 消息、assistant 消息，只压缩旧的 tool 消息。
+    一轮结束后调用一次，不在每次工具调用后重复执行。
+    """
+    # 找出所有 tool 消息的位置
+    tool_positions = [i for i, msg in enumerate(messages) if msg["role"] == "tool"]
+
+    if len(tool_positions) <= KEEP_TOOL_RESULTS:
+        return messages  # 不够多，不用压缩
+
+    # 最后 KEEP_TOOL_RESULTS 条保留，之前的全部压缩
+    cutoff = tool_positions[-(KEEP_TOOL_RESULTS)]  # 倒数第 N 条的位置
+    to_compress = [p for p in tool_positions if p < cutoff]
+
+    if not to_compress:
         return messages
-    last_user_index =  None
-    for i in reversed(range(len(messages))):
-        if messages[i]["role"] == "user":
-            last_user_index = i
-    if last_user_index is None:
-        return messages
+
     compacted = 0
-    for index, message in enumerate(messages):
-        if index >= last_user_index:
-            break
-        if message["role"] == "tool":
-            message["content"] = f"[Previous] used {message.get("name","unknown")}"
-            compacted += 1
+    for idx in to_compress:
+        name = messages[idx].get("name", "unknown")
+        messages[idx]["content"] = f"[Earlier tool result compacted] used {name}"
+        compacted += 1
 
     if compacted:
-        agent_display.show_compact(
-            "1", f"将 {compacted} 条旧 tool 结果替换为占位符"
-        )
+        agent_display.show_compact("1", f"将 {compacted} 条旧 tool 结果替换为占位符")
 
     return messages
 
