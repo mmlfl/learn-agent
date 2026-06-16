@@ -86,19 +86,21 @@ def list_memory_files() -> list[dict]:
 
 def extract_memories(messages: list):
     """从最近对话中提取新记忆,每轮结束后运行"""
-    # 取最近10条消息拼成对话文本
+    # 取最近3条用户消息（跳过工具调用和 AI 回复，只提取用户表达的偏好）
     dialogue_parts = []
-    for msg in messages[-10:]:
-        role = msg.get("role", "?")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                str(getattr(b, "text", "")) for b in content
-                if getattr(b, "type", None) == "text"
-            )
-        if isinstance(content, str) and content.strip():
-            dialogue_parts.append(f"{role}: {content}")
-    dialogue = "\n".join(dialogue_parts)
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    str(getattr(b, "text", "")) for b in content
+                    if getattr(b, "type", None) == "text"
+                )
+            if isinstance(content, str) and content.strip():
+                dialogue_parts.append(content)
+            if len(dialogue_parts) >= 3:
+                break
+    dialogue = "\n".join(reversed(dialogue_parts))
     # 列出已有记忆，避免重复
     existing = list_memory_files()
     existing_desc = (
