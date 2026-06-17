@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import time
 from datetime import datetime
 
@@ -36,6 +37,16 @@ def agent_loop(messages: list):
     round_num = 1
     reactive_retries = 0
 
+    #指数退避参数,解决限流问题
+    rate_limit_retries = 0
+    MAX_RATE_LIMIT_RETRIES = 10
+
+    #max_token截断参数,解决max_token问题
+    max_tokens = 4000
+    has_escalated = False
+    continuation_count = 0
+    MAX_CONTINUATIONS = 3
+
     while True:
         #第二层压缩
         messages = compact_layer2(messages)
@@ -51,7 +62,7 @@ def agent_loop(messages: list):
                     messages=messages,
                     tools=TOOLS,
                     tool_choice="auto",
-                    max_completion_tokens=4000,
+                    max_completion_tokens=max_tokens,
                 )
         except Exception as e:
             err_msg = str(e).lower()
@@ -65,19 +76,52 @@ def agent_loop(messages: list):
                     f"应急压缩重试 {MAX_REACTIVE_RETRIES} 次后仍失败，"
                     f"请使用 /clear 或新会话重试"
                 ) from e
+            elif ("rate limit" in err_msg or "quota exceeded" in err_msg
+                  or "rate increased" in err_msg):
+                if rate_limit_retries < MAX_RATE_LIMIT_RETRIES:
+                    base_ms = min(500 * (2 ** rate_limit_retries), 32000)
+                    jitter = random.uniform(0, base_ms * 0.25)
+                    delay = (base_ms + jitter) / 1000
+                    agent_display.show_compact(
+                        "⏳", f"限流，{delay:.1f}s 后重试 ({rate_limit_retries + 1}/{MAX_RATE_LIMIT_RETRIES})"
+                    )
+                    time.sleep(delay)
+                    rate_limit_retries += 1
+                    continue
+                raise RuntimeError(
+                    f"指数退避 {MAX_RATE_LIMIT_RETRIES} 次后仍限流，请稍后再试"
+                ) from e
             raise
         elapsed = time.time() - t0
-        reactive_retries = 0  # 调用成功，重置计数
+        reactive_retries = 0
         choice = response.choices[0]
 
-        # ── 2. 显示模型回复 ──
-        agent_display.show_model_response(
-            finish_reason=choice.finish_reason,
-            content=choice.message.content,
-            elapsed=elapsed,
-        )
+        # ── 2. 截断处理：先升级，再续写 ──（必须在 append 之前）
+        if choice.finish_reason == "length":
+            if not has_escalated:
+                max_tokens = 64000
+                has_escalated = True
+                agent_display.show_compact("↑", "max_tokens 升级: 4K → 64K")
+                continue  # 不保存截断回复，原样重试
+            # 升级后还截断 → 保存截断回复 + 续写提示
+            messages.append({
+                "role": "assistant",
+                "content": choice.message.content,
+                "tool_calls": choice.message.tool_calls if choice.message.tool_calls else None
+            })
+            if continuation_count < MAX_CONTINUATIONS:
+                messages.append({
+                    "role": "user",
+                    "content": "Output truncated. Resume directly — "
+                               "no apology, no recap. Pick up where you left off."
+                })
+                continuation_count += 1
+                agent_display.show_compact("→", f"续写 {continuation_count}/{MAX_CONTINUATIONS}")
+                continue
+            agent_display.show_compact("✕", "续写 3 次仍截断，放弃本轮")
+            break
 
-        # ── 3. 加入对话历史 ──
+        # ── 3. 正常路径：加入对话历史 ──
         messages.append({
             "role": "assistant",
             "content": choice.message.content,
@@ -93,7 +137,7 @@ def agent_loop(messages: list):
             #如果记忆过多,执行修剪,重复合并等等
             consolidate_memories()
             agent_display.show_final_answer(choice.message.content or "")
-            return
+            break
 
         # ── 5. 显示工具调用清单 ──
         agent_display.show_tool_calls(choice.message.tool_calls)
